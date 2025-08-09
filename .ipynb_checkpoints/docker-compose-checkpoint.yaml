@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  backend:
+    build: .
+    image: genclimate-backend:latest
+    container_name: genclimate_backend
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      - FORECAST_DIR_AIFS=/data/predictions
+      - FORECAST_DIR_S2S=/data/s2s_predictions
+    volumes:
+      - type: bind
+        source: /mnt/local/tester/make_prediction/predictions
+        target: /data/predictions
+        read_only: true
+      - type: bind
+        source: /mnt/local/tester/make_prediction/s2s_predictions
+        target: /data/s2s_predictions
+        read_only: true
+    ports:
+      - "8003:8000"
+    restart: unless-stopped
+    env_file:
+      - .env
