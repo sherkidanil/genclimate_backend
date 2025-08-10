@@ -91,6 +91,6 @@ IFrame(src="preview.html", width="100%", height=800)
 
 Как выглядит визуализация прогноза:
 
-![Демонстрация](imgs/visual.gif)
+![Демонстрация](imgs/visual_x2.gif)
 
 
