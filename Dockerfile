@@ -5,6 +5,7 @@ WORKDIR /app
 # System deps
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential curl ca-certificates \
+    && apt-get install -y --no-install-recommends build-essential libhdf5-dev libnetcdf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip/setuptools/wheel to latest

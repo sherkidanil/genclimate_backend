@@ -19,6 +19,9 @@ services:
         source: /mnt/local/tester/make_prediction/s2s_predictions
         target: /data/s2s_predictions
         read_only: true
+      - type: bind
+        source: /mnt/local/tester/make_prediction/downloads
+        target: /data/downloads   
     ports:
       - "8003:8000"
     restart: unless-stopped

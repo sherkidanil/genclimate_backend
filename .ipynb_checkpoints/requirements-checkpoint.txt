@@ -11,3 +11,5 @@ cachetools==5.3.3
 numpy
 pandas
 plotly==5.22.0
+netcdf4>=1.6.0
+h5netcdf>=1.2.0
