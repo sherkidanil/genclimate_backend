@@ -1,7 +1,6 @@
 import json
 
 import aiohttp
-# from config import CONFIG
 
 
 class aio_requests:

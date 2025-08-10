@@ -12,10 +12,8 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Кэш, чтобы не перезагружать данные с диска слишком часто
 _dataset_cache: TTLCache = TTLCache(maxsize=3, ttl=settings.cache_ttl)
 
-# ---------------------------------------------------------------------
 
 def _collect_prediction_format_zarrs(root: Path) -> Tuple[List[Path], List[np.datetime64]]:
     """
@@ -38,11 +36,9 @@ def _collect_prediction_format_zarrs(root: Path) -> Tuple[List[Path], List[np.da
     if not paths:
         raise FileNotFoundError(f"No prediction_format.zarr found under {root}")
 
-    # сортируем по времени
     times, paths = zip(*sorted(zip(times, paths)))
     return list(paths), list(times)
 
-# ---------------------------------------------------------------------
 
 @cached(_dataset_cache)
 def load_latest_dataset(model_name: str) -> xr.Dataset:
@@ -60,7 +56,6 @@ def load_latest_dataset(model_name: str) -> xr.Dataset:
     for ts, p in zip(times, paths):
         logger.info("Opening %s", p)
         ds = xr.open_zarr(p, consolidated=True)
-        # Добавляем forecast_time как измерение
         ds = ds.expand_dims({"forecast_time": [ts]})
         datasets.append(ds)
 

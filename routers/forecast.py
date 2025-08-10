@@ -1,4 +1,3 @@
-# forecast.py
 from __future__ import annotations
 
 import logging, math, os, time, threading, re, shutil
@@ -22,24 +21,15 @@ logger = logging.getLogger(__name__)
 
 request = aio_requests()
 
-# ------------------------------------------------------------------------------
-# Конфиг путей для временных файлов скачивания
-# ------------------------------------------------------------------------------
 DOWNLOAD_ROOT = Path(getattr(settings, "download_dir", "/tmp/genclimate_downloads")).expanduser().resolve()
 DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
-# ------------------------------------------------------------------------------
-# Группы параметров (Enum-ключи, как в point_forecast)
-# ------------------------------------------------------------------------------
 PARAM_GROUPS: Dict[ParamsEnum, List[str]] = {
     ParamsEnum.simple: ["2t", "10u", "10v", "msl"],
     ParamsEnum.surface: ["10u", "10v", "2d", "2t", "msl", "skt", "sp", "tcw", "lsm", "z", "slor", "sdor"],
     ParamsEnum.full: [],  # все переменные
 }
 
-# ------------------------------------------------------------------------------
-# Zarr loader + лёгкий кеш (чтобы не перечитывать дерево на каждый запрос)
-# ------------------------------------------------------------------------------
 def load_predictions_from_tree(base_dir: str | Path) -> xr.Dataset:
     """Открывает все .../YYYYMMDD/HH/prediction_format.zarr и склеивает по forecast_time."""
     base_path = Path(base_dir).expanduser().resolve()
@@ -124,9 +114,6 @@ def load_predictions_from_tree_cached(base_dir: str | Path, *, rescan_sec: int =
         _DS_CACHE[base_path] = _CacheEntry(ds=ds, signature=signature, last_scan=now)
     return ds
 
-# ------------------------------------------------------------------------------
-# Хелперы, использующиеся в обоих эндпойнтах
-# ------------------------------------------------------------------------------
 async def _geocode(city: str) -> Dict[str, float]:
     params = {"q": city, "format": "json", "limit": 1}
     headers = {"User-Agent": settings.geocoder_user_agent}
@@ -218,9 +205,6 @@ def _extract_timeseries(
 
     return out
 
-# ------------------------------------------------------------------------------
-# CROP (оставляем долготу как в исходном DS; корректно режем при L1>L2)
-# ------------------------------------------------------------------------------
 def crop_forecast(
     ds: xr.Dataset,
     lat1: float, lon1: float,
@@ -285,9 +269,6 @@ def crop_forecast(
 
     return ds_space
 
-# ------------------------------------------------------------------------------
-# Plotly превью (dropdown по переменным, slider по времени) в домене 0..360
-# ------------------------------------------------------------------------------
 def plot_forecast_map(
     ds: xr.Dataset,
     *,
@@ -322,14 +303,12 @@ def plot_forecast_map(
     times = ds_disp[tdim].values
     nT = len(times)
 
-    # детект пересечения 0°: поиск скачка убывания
     diffs = np.diff(lons)
     cuts = np.where(diffs < 0)[0]
     if cuts.size:
-        cut = int(cuts[0] + 1)  # начало второй части (0..L2)
+        cut = int(cuts[0] + 1) 
         lons_plot = lons.copy()
         lons_plot[cut:] = lons_plot[cut:] + 360.0
-        # аккуратные тики по модулю 360
         x_lo, x_hi = float(lons_plot.min()), float(lons_plot.max())
         step = 30.0
         start = math.ceil(x_lo / step) * step
@@ -419,9 +398,7 @@ def plot_forecast_map(
     fig.update_yaxes(range=[y_lo, y_hi], scaleanchor="x", scaleratio=1)
     return fig
 
-# ------------------------------------------------------------------------------
-# point_forecast — оставляем как есть
-# ------------------------------------------------------------------------------
+
 @router.get("/point_forecast", response_model=ForecastResponse)
 async def point_forecast(
     city: str | None = Query(None, description="City name (ignored if lat/lon provided)"),
@@ -450,16 +427,7 @@ async def point_forecast(
 
     return ForecastResponse(location={"lat": float(lat), "lon": float(lon)}, start_time=start_dt, data=series, model_id=model)
 
-# ------------------------------------------------------------------------------
-# region_forecast — Zarr ZIP
-# Вернёт:
-#  • краткую сводку по сетке/времени/переменным,
-#  • ссылку на ZIP с консолидированным Zarr-стором,
-#  • HTML (inline) с интерактивной Plotly-картой.
-# ------------------------------------------------------------------------------
-
 def _sanitize_for_zarr(ds: xr.Dataset) -> xr.Dataset:
-    """Самая лёгкая санитизация атрибутов для JSON/Zarr (numpy → python, datetime64 → ISO-строка)."""
     import numpy as _np
     ds = ds.copy(deep=False)
     def _to_jsonable(v):
@@ -522,10 +490,8 @@ async def region_forecast(
     if model != "medium":
         raise HTTPException(status_code=400, detail="Only model=medium is supported for region_forecast now.")
 
-    # 1) открыть прогнозы (с кешом)
     ds = load_predictions_from_tree_cached(settings.forecast_dir_aifs, rescan_sec=60)
 
-    # 2) кроп по времени/боксу/переменным
     try:
         subset = crop_forecast(
             ds,
@@ -564,7 +530,6 @@ async def region_forecast(
         "model_id": ds.attrs.get("model_id", "aifs"),
     }
 
-    # 4) сохранить Zarr→ZIP
     try:
         file_name = _save_subset_zarr_zip(subset)
     except Exception as e:
@@ -572,7 +537,6 @@ async def region_forecast(
 
     download_url = f"/region_file/{file_name}"
 
-    # 5) превью Plotly
     try:
         fig = plot_forecast_map(subset, title="Region forecast")
         preview_html = fig.to_html(full_html=False, include_plotlyjs="cdn")
@@ -580,7 +544,6 @@ async def region_forecast(
         logger.exception("Plotly preview failed")
         preview_html = f"<div>Preview error: {e}</div>"
 
-    # 6) ответ
     return {
         "summary": summary,
         "download_url": download_url,          # .zarr.zip
