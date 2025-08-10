@@ -7,5 +7,5 @@
 
 ## Как это все работает
 
-![Архитектура](imgs/architecture.svg)
+![Архитектура](imgs/backend_scheme.svg)
 
