@@ -64,7 +64,6 @@ def load_predictions_from_tree(base_dir: str | Path) -> xr.Dataset:
     combined.attrs.setdefault("initial_time", str(times[0]))
     return combined
 
-# --- кеш поверх loader --------------------------------------------------------
 DEFAULT_RESCAN_SEC = 60
 
 @dataclass
@@ -221,20 +220,17 @@ def crop_forecast(
     if "forecast_time" not in ds.coords:
         raise ValueError("нет координаты 'forecast_time'")
 
-    # время
     t0 = ds["forecast_time"].isel(forecast_time=0).values
     cutoff = np.datetime64(t0) + np.timedelta64(int(days), "D")
     ds_t = ds.where(ds["forecast_time"] < cutoff, drop=True)
 
-    # широта (в любом порядке в исходнике)
     lat_min, lat_max = sorted([lat1, lat2])
     lat_asc = float(ds["lat"].isel(lat=1)) > float(ds["lat"].isel(lat=0))
     lat_slice = slice(lat_min, lat_max) if lat_asc else slice(lat_max, lat_min)
 
-    # привести входные долготы в домен датасета (без смены самого домена)
     lon_min_ds = float(ds["lon"].min())
     lon_max_ds = float(ds["lon"].max())
-    ds_is_0360 = lon_max_ds > 180.0  # типично для ERA5 0..360
+    ds_is_0360 = lon_max_ds > 180.0  
 
     def to_ds_domain(lon):
         lon = float(lon)
@@ -248,7 +244,6 @@ def crop_forecast(
 
     L1, L2 = to_ds_domain(lon1), to_ds_domain(lon2)
 
-    # кроп по долготе; если пересекаем 0°, режем на два куска и конкатим
     if not (ds_is_0360 and L1 > L2):
         ds_space = ds_t.sel(lat=lat_slice, lon=slice(L1, L2))
     else:
@@ -256,7 +251,6 @@ def crop_forecast(
         p2 = ds_t.sel(lat=lat_slice, lon=slice(lon_min_ds, L2))
         ds_space = xr.concat([p1, p2], dim="lon")
 
-    # (опц.) фильтр переменных
     if params_group is not None and param_groups is not None:
         wanted = param_groups.get(params_group, [])
         if wanted:  # пустой список → все
@@ -292,7 +286,6 @@ def plot_forecast_map(
     if not var_names:
         raise ValueError("Нет переменных с dims == (forecast_time, lat, lon)")
 
-    # широта по возрастанию (для оси Y)
     ds_disp = ds.sortby(ydim)
     if decimate > 1:
         ds_disp = ds_disp.isel(**{ydim: slice(0, None, decimate),
@@ -321,7 +314,6 @@ def plot_forecast_map(
 
     y_lo, y_hi = float(lats.min()), float(lats.max())
 
-    # единая шкала per variable
     var_scales = {}
     for v in var_names:
         q = ds_disp[v].quantile(quantiles).compute().values
@@ -331,7 +323,6 @@ def plot_forecast_map(
             vmax = float(ds_disp[v].max().compute())
         var_scales[v] = (vmin, vmax)
 
-    # трейсы (var,time)
     data_traces, idx = [], {}
     for vi, v in enumerate(var_names):
         vmin, vmax = var_scales[v]
@@ -385,7 +376,6 @@ def plot_forecast_map(
     )
     fig.update_xaxes(range=[x_lo, x_hi])
 
-    # подгоняем размер фигуры под аспект кропа
     x_span = x_hi - x_lo
     y_span = y_hi - y_lo
     ratio = (x_span / y_span) if y_span != 0 else 1.0
@@ -507,7 +497,6 @@ async def region_forecast(
     if subset.dims.get("lat", 0) == 0 or subset.dims.get("lon", 0) == 0:
         raise HTTPException(status_code=400, detail="Empty selection for given box.")
 
-    # 3) краткая сводка
     ft = subset.coords.get("forecast_time")
     t_start = str(np.datetime_as_string(ft.values[0], unit="h")) if ft is not None and ft.size else None
     t_end = str(np.datetime_as_string(ft.values[-1], unit="h")) if ft is not None and ft.size else None
@@ -546,7 +535,7 @@ async def region_forecast(
 
     return {
         "summary": summary,
-        "download_url": download_url,          # .zarr.zip
+        "download_url": download_url,        
         "preview_html": preview_html,
         "bbox_request": {
             "lat1": lat1, "lon1": lon1,
