@@ -19,6 +19,15 @@ class AI4SSettings(BaseSettings):
     secret_key: str
 
 
+class S3Settings(BaseSettings):
+    model_config = _ConfigDict("s3_")
+    access_key_id: str
+    secret_access_key: str
+    bucket_name: str = ""
+    region_name: str = "ru-moscow-1"
+    endpoint_url: str = "https://obs.ru-moscow-1.hc.sbercloud.ru"
+
+
 class Settings(BaseSettings):
     """Centralised runtime configuration."""
 
@@ -39,6 +48,8 @@ class Settings(BaseSettings):
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
     ai4s: AI4SSettings = AI4SSettings()  # type: ignore
+    s3: S3Settings = S3Settings()  # type: ignore
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
