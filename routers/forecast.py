@@ -9,10 +9,13 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from uuid import uuid4
 
 import numpy as np
+import orjson
 import plotly.graph_objects as go
 import xarray as xr
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,7 +24,8 @@ from fastapi.responses import FileResponse
 from auth.bearer import verify_token
 from config import settings
 from core.async_requests import aio_requests
-from core.schemas import ForecastResponse, LeadtimeData, ModeEnum, ParamsEnum
+from core.s3_client import s3_client
+from core.schemas import ForecastPointResponse, LeadtimeData, ModeEnum, ParamsEnum
 
 router = APIRouter(tags=["Forecasts"])
 logger = logging.getLogger(__name__)
@@ -436,7 +440,7 @@ def plot_forecast_map(
     return fig
 
 
-@router.get("/point_forecast", response_model=ForecastResponse)
+@router.get("/point_forecast")
 async def point_forecast(
     city: str | None = Query(None, description="City name (ignored if lat/lon provided)"),
     lat: float | None = Query(None, ge=-90, le=90),
@@ -459,12 +463,24 @@ async def point_forecast(
     if not vars_requested:
         raise HTTPException(status_code=400, detail="No variables matched requested params")
 
+    assert lat is not None
+    assert lon is not None
+
     series = _extract_timeseries(ds, float(lat), float(lon), vars_requested, days, mode)
     start_dt = _get_initial_time(ds)
 
-    return ForecastResponse(
-        location={"lat": float(lat), "lon": float(lon)}, start_time=start_dt, data=series, model_id=model
-    )
+    s3_prefix = f"forecasts/point_data/{str(uuid4())}"
+    s3_key = f"{s3_prefix}/series.json"
+
+    bytes_obj = BytesIO(orjson.dumps(series))
+    upload_success = s3_client.upload_fileobj(bytes_obj, s3_key)
+    if not upload_success:
+        raise HTTPException(status_code=500, detail="Failed to upload JSON data to S3")
+    data_url = s3_client.get_download_url(s3_key)
+    if not data_url:
+        raise HTTPException(status_code=500, detail="Failed to generate JSON data URL")
+
+    return ForecastPointResponse(lat=float(lat), lon=float(lon), start_time=start_dt, data_url=data_url)
 
 
 def _sanitize_for_zarr(ds: xr.Dataset) -> xr.Dataset:
@@ -583,7 +599,20 @@ async def region_forecast(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write Zarr ZIP: {e}")
 
+    s3_prefix = f"forecasts/region_data/{str(uuid4())}"
+    # по этому пути файл доступен на сервере
     download_url = f"/region_file/{file_name}"
+
+    # По этому пути файл будет лежать в S3
+    s3_key = f"{s3_prefix}/{file_name}"
+    upload_success = s3_client.upload_file(download_url, s3_key)
+    if not upload_success:
+        raise HTTPException(status_code=500, detail="Failed to upload file to S3")
+
+    # Генерируем presigned URL для скачивания
+    s3_presigned_url = s3_client.get_download_url(s3_key)
+    if not s3_presigned_url:
+        raise HTTPException(status_code=500, detail="Failed to generate download URL")
 
     try:
         fig = plot_forecast_map(subset, title="Region forecast")
@@ -592,10 +621,22 @@ async def region_forecast(
         logger.exception("Plotly preview failed")
         preview_html = f"<div>Preview error: {e}</div>"
 
+    # Сохраняем HTML preview в S3
+    html_s3_key = f"{s3_prefix}/preview.html"
+    html_bytes_obj = BytesIO(preview_html.encode("utf-8"))
+
+    html_upload_success = s3_client.upload_fileobj(html_bytes_obj, html_s3_key)
+    if not html_upload_success:
+        raise HTTPException(status_code=500, detail="Failed to upload HTML preview to S3")
+
+    preview_url = s3_client.get_download_url(html_s3_key)
+    if not preview_url:
+        raise HTTPException(status_code=500, detail="Failed to generate download URL for HTML preview")
+
     return {
         "summary": summary,
-        "download_url": download_url,
-        "preview_html": preview_html,
+        "download_url": s3_presigned_url,
+        "preview_html": preview_url,
         "bbox_request": {
             "lat1": lat1,
             "lon1": lon1,
