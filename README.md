@@ -93,9 +93,45 @@ IFrame(src="preview.html", width="100%", height=800)
 
 ![Демонстрация](imgs/visual_x2.gif)
 
+## Работа с зависимостями
+
+предлагается использовать менеджер зависимостей uv
+
+### Установка uv
+
+https://docs.astral.sh/uv/getting-started/installation/
+
+Простой способ на linux|ocx
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### Начальная инициализация окружения
+
+```bash
+uv venv
+uv sync
+```
+
+Происходит создание окружения в локальной папке `.venv` и установка зависимостей из [pyproject](./pyproject.toml) файла
+
+### Запуск сервера
+
+Либо активировать venv и запускать как раньше
+
+```bash
+source .venv/bin/activate
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Либо запускать с помощью uv
+
+```bash
+uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
 ## Что дальше?
 
 * Добавление новой модели для среднесрочного прогноза (45 дней)
 * интеграция с хранилищем S3 (обсуждается)
-
-
