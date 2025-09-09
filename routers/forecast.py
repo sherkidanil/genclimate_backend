@@ -1,20 +1,31 @@
 from __future__ import annotations
 
-import logging, math, os, time, threading, re, shutil
+import logging
+import math
+import os
+import re
+import shutil
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from uuid import uuid4
 
 import numpy as np
-import xarray as xr
+import orjson
 import plotly.graph_objects as go
-from fastapi import APIRouter, HTTPException, Query
+import xarray as xr
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 
+from auth.bearer import verify_token
 from config import settings
 from core.async_requests import aio_requests
-from core.schemas import ForecastResponse, LeadtimeData, ModeEnum, ParamsEnum
+from core.s3_client import s3_client
+from core.schemas import ForecastPointResponse, LeadtimeData, ModeEnum, ParamsEnum
 
 router = APIRouter(tags=["Forecasts"])
 logger = logging.getLogger(__name__)
@@ -29,6 +40,7 @@ PARAM_GROUPS: Dict[ParamsEnum, List[str]] = {
     ParamsEnum.surface: ["10u", "10v", "2d", "2t", "msl", "skt", "sp", "tcw", "lsm", "z", "slor", "sdor"],
     ParamsEnum.full: [],  # все переменные
 }
+
 
 def load_predictions_from_tree(base_dir: str | Path) -> xr.Dataset:
     """Открывает все .../YYYYMMDD/HH/prediction_format.zarr и склеивает по forecast_time."""
@@ -64,7 +76,9 @@ def load_predictions_from_tree(base_dir: str | Path) -> xr.Dataset:
     combined.attrs.setdefault("initial_time", str(times[0]))
     return combined
 
+
 DEFAULT_RESCAN_SEC = 60
+
 
 @dataclass
 class _CacheEntry:
@@ -72,8 +86,10 @@ class _CacheEntry:
     signature: Tuple
     last_scan: float
 
+
 _DS_CACHE: dict[Path, _CacheEntry] = {}
 _DS_CACHE_LOCK = threading.Lock()
+
 
 def _dir_signature(base_dir: Path) -> Tuple:
     items = []
@@ -89,6 +105,7 @@ def _dir_signature(base_dir: Path) -> Tuple:
             continue
     items.sort()
     return tuple(items)
+
 
 def load_predictions_from_tree_cached(base_dir: str | Path, *, rescan_sec: int = DEFAULT_RESCAN_SEC) -> xr.Dataset:
     base_path = Path(base_dir).expanduser().resolve()
@@ -113,6 +130,7 @@ def load_predictions_from_tree_cached(base_dir: str | Path, *, rescan_sec: int =
         _DS_CACHE[base_path] = _CacheEntry(ds=ds, signature=signature, last_scan=now)
     return ds
 
+
 async def _geocode(city: str) -> Dict[str, float]:
     params = {"q": city, "format": "json", "limit": 1}
     headers = {"User-Agent": settings.geocoder_user_agent}
@@ -120,6 +138,7 @@ async def _geocode(city: str) -> Dict[str, float]:
     if not payload:
         raise HTTPException(status_code=404, detail="City not found")
     return {"lat": float(payload[0]["lat"]), "lon": float(payload[0]["lon"])}
+
 
 def _normalize_lon_to_ds(lon_in: float, ds_lon_values: np.ndarray) -> float:
     lon = float(lon_in)
@@ -132,21 +151,25 @@ def _normalize_lon_to_ds(lon_in: float, ds_lon_values: np.ndarray) -> float:
             lon -= 360.0
     return lon
 
+
 def _list_requested_vars(ds: xr.Dataset, params: ParamsEnum) -> list[str]:
     if params == ParamsEnum.full or not PARAM_GROUPS[params]:
         return list(ds.data_vars)
     available = set(ds.data_vars)
     return [v for v in PARAM_GROUPS[params] if v in available]
 
+
 def _select_point(ds: xr.Dataset, lat: float, lon: float) -> xr.Dataset:
     lon_adj = _normalize_lon_to_ds(lon, ds["lon"].values)
     return ds.sel(lat=lat, lon=lon_adj, method="nearest")
+
 
 def _get_max_days(ds: xr.Dataset) -> int:
     if "forecast_time" in ds.dims:
         return int(ds.dims["forecast_time"])
     mid = (ds.attrs.get("model_id") or "").lower()
     return 15 if "aifs" in mid else 45 if ("s2s" in mid or "fuxi" in mid) else 1
+
 
 def _get_initial_time(ds: xr.Dataset) -> datetime:
     init = ds.attrs.get("initial_time")
@@ -156,6 +179,7 @@ def _get_initial_time(ds: xr.Dataset) -> datetime:
         except Exception:
             pass
     return datetime.utcnow()
+
 
 def _reduce_variable(da: xr.DataArray, mode: ModeEnum):
     if mode == ModeEnum.base:
@@ -167,6 +191,7 @@ def _reduce_variable(da: xr.DataArray, mode: ModeEnum):
             return np.asarray(da.values).ravel().astype(float).tolist()
         return [float(np.asarray(da.values))]
 
+
 def _extract_timeseries(
     ds: xr.Dataset,
     lat: float,
@@ -174,7 +199,7 @@ def _extract_timeseries(
     vars_: list[str],
     days: int,
     mode: ModeEnum,
-    model_id: str = Query("medium", enum=["medium", "s2s"])
+    model_id: str = Query("medium", enum=["medium", "s2s"]),
 ) -> list[LeadtimeData]:
     max_days = _get_max_days(ds)
     days = int(max(1, min(days, max_days)))
@@ -184,7 +209,7 @@ def _extract_timeseries(
 
     if "forecast_time" in point.dims:
         ft = np.asarray(point["forecast_time"].values)
-        if model_id == 'medium':
+        if model_id == "medium":
             n = min(days, ft.shape[0])
         else:
             n = min(days * 4, ft.shape[0])
@@ -204,10 +229,13 @@ def _extract_timeseries(
 
     return out
 
+
 def crop_forecast(
     ds: xr.Dataset,
-    lat1: float, lon1: float,
-    lat2: float, lon2: float,
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
     days: int,
     *,
     params_group: Optional[ParamsEnum] = None,
@@ -230,11 +258,11 @@ def crop_forecast(
 
     lon_min_ds = float(ds["lon"].min())
     lon_max_ds = float(ds["lon"].max())
-    ds_is_0360 = lon_max_ds > 180.0  
+    ds_is_0360 = lon_max_ds > 180.0
 
     def to_ds_domain(lon):
         lon = float(lon)
-        if ds_is_0360:     # 0..360
+        if ds_is_0360:  # 0..360
             return lon % 360.0
         # [-180,180]
         x = ((lon + 180.0) % 360.0) - 180.0
@@ -254,7 +282,10 @@ def crop_forecast(
     if params_group is not None and param_groups is not None:
         wanted = param_groups.get(params_group, [])
         if wanted:  # пустой список → все
-            def match(n): return any(n == w or n.startswith(w + "_") for w in wanted)
+
+            def match(n):
+                return any(n == w or n.startswith(w + "_") for w in wanted)
+
             keep = [k for k in ds_space.data_vars if match(k)]
             if not keep and require_present:
                 raise ValueError(f"Не найдено ни одной переменной из группы {params_group}")
@@ -262,6 +293,7 @@ def crop_forecast(
                 ds_space = ds_space[keep]
 
     return ds_space
+
 
 def plot_forecast_map(
     ds: xr.Dataset,
@@ -279,17 +311,13 @@ def plot_forecast_map(
     tdim, ydim, xdim = dims
     if var_names is None:
         req = set(dims)
-        var_names = [
-            k for k, da in ds.data_vars.items()
-            if set(da.dims) == req and all(d in da.dims for d in dims)
-        ]
+        var_names = [k for k, da in ds.data_vars.items() if set(da.dims) == req and all(d in da.dims for d in dims)]
     if not var_names:
         raise ValueError("Нет переменных с dims == (forecast_time, lat, lon)")
 
     ds_disp = ds.sortby(ydim)
     if decimate > 1:
-        ds_disp = ds_disp.isel(**{ydim: slice(0, None, decimate),
-                                  xdim: slice(0, None, decimate)})
+        ds_disp = ds_disp.isel(**{ydim: slice(0, None, decimate), xdim: slice(0, None, decimate)})
 
     lats = ds_disp[ydim].values
     lons = ds_disp[xdim].values
@@ -299,7 +327,7 @@ def plot_forecast_map(
     diffs = np.diff(lons)
     cuts = np.where(diffs < 0)[0]
     if cuts.size:
-        cut = int(cuts[0] + 1) 
+        cut = int(cuts[0] + 1)
         lons_plot = lons.copy()
         lons_plot[cut:] = lons_plot[cut:] + 360.0
         x_lo, x_hi = float(lons_plot.min()), float(lons_plot.max())
@@ -329,8 +357,11 @@ def plot_forecast_map(
         for ti in range(nT):
             z = np.asarray(ds_disp[v].isel({tdim: ti}).values, dtype=np.float32)
             tr = go.Heatmap(
-                z=z, x=lons_plot, y=lats,
-                zmin=vmin, zmax=vmax,
+                z=z,
+                x=lons_plot,
+                y=lats,
+                zmin=vmin,
+                zmax=vmax,
                 colorbar=dict(title=v, len=0.8),
                 visible=False,
                 hovertemplate=f"lat=%{{y:.2f}}°, lon=%{{x:.2f}}°<br>{v}=%{{z}}<extra></extra>",
@@ -345,31 +376,51 @@ def plot_forecast_map(
         for ti in range(nT):
             vis = [False] * len(data_traces)
             vis[idx[(active_vi, ti)]] = True
-            steps.append(dict(
-                method="update",
-                args=[{"visible": vis},
-                      {"title": f"{title} — {var_names[active_vi]} — "
-                                f"{np.datetime_as_string(times[ti], unit='h')}"}],
-                label=np.datetime_as_string(times[ti], unit="h")
-            ))
+            steps.append(
+                dict(
+                    method="update",
+                    args=[
+                        {"visible": vis},
+                        {"title": f"{title} — {var_names[active_vi]} — {np.datetime_as_string(times[ti], unit='h')}"},
+                    ],
+                    label=np.datetime_as_string(times[ti], unit="h"),
+                )
+            )
         return steps
 
     sliders = [dict(active=0, currentvalue={"prefix": "Time: "}, pad={"t": 40}, steps=slider_steps(0))]
-    updatemenus = [dict(
-        buttons=[dict(
-            label=v, method="update",
-            args=[{"visible": [(i == idx[(vi, 0)]) for i in range(len(data_traces))]},
-                  {"title": f"{title} — {v} — {np.datetime_as_string(times[0], unit='h')}",
-                   "sliders": [dict(active=0, currentvalue={"prefix": "Time: "}, pad={"t": 40},
-                                    steps=slider_steps(vi))]}]
-        ) for vi, v in enumerate(var_names)],
-        direction="down", showactive=True, x=0.01, y=1.12, xanchor="left", yanchor="top",
-    )]
+    updatemenus = [
+        dict(
+            buttons=[
+                dict(
+                    label=v,
+                    method="update",
+                    args=[
+                        {"visible": [(i == idx[(vi, 0)]) for i in range(len(data_traces))]},
+                        {
+                            "title": f"{title} — {v} — {np.datetime_as_string(times[0], unit='h')}",
+                            "sliders": [
+                                dict(active=0, currentvalue={"prefix": "Time: "}, pad={"t": 40}, steps=slider_steps(vi))
+                            ],
+                        },
+                    ],
+                )
+                for vi, v in enumerate(var_names)
+            ],
+            direction="down",
+            showactive=True,
+            x=0.01,
+            y=1.12,
+            xanchor="left",
+            yanchor="top",
+        )
+    ]
 
     fig = go.Figure(data=data_traces)
     fig.update_layout(
         title=f"{title} — {var_names[0]} — {np.datetime_as_string(times[0], unit='h')}",
-        updatemenus=updatemenus, sliders=sliders,
+        updatemenus=updatemenus,
+        sliders=sliders,
         xaxis_title="Longitude (0..360)",
         yaxis_title="Latitude",
         margin=dict(l=60, r=20, t=90, b=40),
@@ -389,7 +440,7 @@ def plot_forecast_map(
     return fig
 
 
-@router.get("/point_forecast", response_model=ForecastResponse)
+@router.get("/point_forecast")
 async def point_forecast(
     city: str | None = Query(None, description="City name (ignored if lat/lon provided)"),
     lat: float | None = Query(None, ge=-90, le=90),
@@ -412,14 +463,31 @@ async def point_forecast(
     if not vars_requested:
         raise HTTPException(status_code=400, detail="No variables matched requested params")
 
+    assert lat is not None
+    assert lon is not None
+
     series = _extract_timeseries(ds, float(lat), float(lon), vars_requested, days, mode)
     start_dt = _get_initial_time(ds)
 
-    return ForecastResponse(location={"lat": float(lat), "lon": float(lon)}, start_time=start_dt, data=series, model_id=model)
+    s3_prefix = f"forecasts/point_data/{str(uuid4())}"
+    s3_key = f"{s3_prefix}/series.json"
+
+    bytes_obj = BytesIO(orjson.dumps(series))
+    upload_success = s3_client.upload_fileobj(bytes_obj, s3_key)
+    if not upload_success:
+        raise HTTPException(status_code=500, detail="Failed to upload JSON data to S3")
+    data_url = s3_client.get_download_url(s3_key)
+    if not data_url:
+        raise HTTPException(status_code=500, detail="Failed to generate JSON data URL")
+
+    return ForecastPointResponse(lat=float(lat), lon=float(lon), start_time=start_dt, data_url=data_url)
+
 
 def _sanitize_for_zarr(ds: xr.Dataset) -> xr.Dataset:
     import numpy as _np
+
     ds = ds.copy(deep=False)
+
     def _to_jsonable(v):
         if isinstance(v, (str, int, float, bool)) or v is None:
             return v
@@ -440,6 +508,7 @@ def _sanitize_for_zarr(ds: xr.Dataset) -> xr.Dataset:
         if isinstance(v, _np.ndarray):
             return [_to_jsonable(x) for x in v.tolist()]
         return str(v)
+
     ds.attrs = {k: _to_jsonable(v) for k, v in dict(ds.attrs).items()}
     for name, var in ds.variables.items():
         if var.attrs:
@@ -447,6 +516,7 @@ def _sanitize_for_zarr(ds: xr.Dataset) -> xr.Dataset:
     if "forecast_time" in ds.coords and np.issubdtype(ds["forecast_time"].dtype, np.datetime64):
         ds["forecast_time"] = ds["forecast_time"].astype("datetime64[ns]")
     return ds
+
 
 def _save_subset_zarr_zip(ds_sub: xr.Dataset) -> str:
     """Сохраняет вырезанный регион как Zarr (consolidated) и упаковывает в ZIP.
@@ -460,12 +530,14 @@ def _save_subset_zarr_zip(ds_sub: xr.Dataset) -> str:
     shutil.rmtree(store_dir, ignore_errors=True)
     return Path(zip_path).name  # например, region_20250810T123456_1234.zarr.zip
 
+
 @router.get("/region_file/{file_name}")
 def region_file(file_name: str):
     fpath = (DOWNLOAD_ROOT / file_name).resolve()
     if not fpath.exists() or fpath.parent != DOWNLOAD_ROOT:
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path=str(fpath), media_type="application/zip", filename=fpath.name)
+
 
 @router.get("/region_forecast")
 async def region_forecast(
@@ -476,6 +548,7 @@ async def region_forecast(
     days: int = Query(3, ge=1, le=45, description="Сколько суток от первого forecast_time"),
     params: ParamsEnum = Query(ParamsEnum.simple),
     model: str = Query("medium", enum=["medium", "s2s"]),
+    token: str = Depends(verify_token),
 ):
     if model != "medium":
         raise HTTPException(status_code=400, detail="Only model=medium is supported for region_forecast now.")
@@ -485,8 +558,10 @@ async def region_forecast(
     try:
         subset = crop_forecast(
             ds,
-            lat1=lat1, lon1=lon1,
-            lat2=lat2, lon2=lon2,
+            lat1=lat1,
+            lon1=lon1,
+            lat2=lat2,
+            lon2=lon2,
             days=days,
             params_group=params,
             param_groups=PARAM_GROUPS,
@@ -524,7 +599,20 @@ async def region_forecast(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write Zarr ZIP: {e}")
 
+    s3_prefix = f"forecasts/region_data/{str(uuid4())}"
+    # по этому пути файл доступен на сервере
     download_url = f"/region_file/{file_name}"
+
+    # По этому пути файл будет лежать в S3
+    s3_key = f"{s3_prefix}/{file_name}"
+    upload_success = s3_client.upload_file(download_url, s3_key)
+    if not upload_success:
+        raise HTTPException(status_code=500, detail="Failed to upload file to S3")
+
+    # Генерируем presigned URL для скачивания
+    s3_presigned_url = s3_client.get_download_url(s3_key)
+    if not s3_presigned_url:
+        raise HTTPException(status_code=500, detail="Failed to generate download URL")
 
     try:
         fig = plot_forecast_map(subset, title="Region forecast")
@@ -533,13 +621,27 @@ async def region_forecast(
         logger.exception("Plotly preview failed")
         preview_html = f"<div>Preview error: {e}</div>"
 
+    # Сохраняем HTML preview в S3
+    html_s3_key = f"{s3_prefix}/preview.html"
+    html_bytes_obj = BytesIO(preview_html.encode("utf-8"))
+
+    html_upload_success = s3_client.upload_fileobj(html_bytes_obj, html_s3_key)
+    if not html_upload_success:
+        raise HTTPException(status_code=500, detail="Failed to upload HTML preview to S3")
+
+    preview_url = s3_client.get_download_url(html_s3_key)
+    if not preview_url:
+        raise HTTPException(status_code=500, detail="Failed to generate download URL for HTML preview")
+
     return {
         "summary": summary,
-        "download_url": download_url,        
-        "preview_html": preview_html,
+        "download_url": s3_presigned_url,
+        "preview_html": preview_url,
         "bbox_request": {
-            "lat1": lat1, "lon1": lon1,
-            "lat2": lat2, "lon2": lon2,
+            "lat1": lat1,
+            "lon1": lon1,
+            "lat2": lat2,
+            "lon2": lon2,
             "days": days,
             "params": params.value if hasattr(params, "value") else str(params),
         },

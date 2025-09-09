@@ -2,24 +2,26 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field, conint
 
-from datetime import datetime
 
 class ParamsEnum(str, Enum):
     simple = "simple"
     surface = "surface"
     full = "full"
 
+
 class ModeEnum(str, Enum):
     base = "base"
-    ens = "ens"            # оставляем как у тебя; можно переименовать в "ensemble"
+    ens = "ens"  # оставляем как у тебя; можно переименовать в "ensemble"
+
 
 class ModelEnum(str, Enum):
-    medium = "medium"      # AIFS
-    s2s = "s2s"            # S2S
+    medium = "medium"  # AIFS
+    s2s = "s2s"  # S2S
+
 
 class ForecastQuery(BaseModel):
     city: Optional[str] = Field(default=None, description="City name; ignored if lat/lon provided")
@@ -30,15 +32,25 @@ class ForecastQuery(BaseModel):
     mode: ModeEnum = ModeEnum.base
     model: ModelEnum = ModelEnum.medium
 
+
 class Location(BaseModel):
     lat: float
     lon: float
+
 
 class LeadtimeData(BaseModel):
     time: datetime
     params: Dict[str, Any]
 
+
 class ForecastResponse(BaseModel):
     location: Location
     start_time: datetime
-    data: List[LeadtimeData]
+    data: list[LeadtimeData]
+
+
+class ForecastPointResponse(BaseModel):
+    lat: float
+    lon: float
+    start_time: datetime
+    data_url: str
