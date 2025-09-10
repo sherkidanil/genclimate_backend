@@ -440,7 +440,7 @@ def plot_forecast_map(
     return fig
 
 
-@router.get("/point_forecast")
+@router.get("/point_forecast", dependencies=[Depends(verify_token)])
 async def point_forecast(
     city: str | None = Query(None, description="City name (ignored if lat/lon provided)"),
     lat: float | None = Query(None, ge=-90, le=90),
@@ -539,7 +539,7 @@ def region_file(file_name: str):
     return FileResponse(path=str(fpath), media_type="application/zip", filename=fpath.name)
 
 
-@router.get("/region_forecast")
+@router.get("/region_forecast", dependencies=[Depends(verify_token)])
 async def region_forecast(
     lat1: float = Query(..., ge=-90, le=90, description="Северо-западный угол: широта"),
     lon1: float = Query(..., ge=-180, le=360, description="Северо-западный угол: долгота (0..360 или -180..180)"),
@@ -548,7 +548,6 @@ async def region_forecast(
     days: int = Query(3, ge=1, le=45, description="Сколько суток от первого forecast_time"),
     params: ParamsEnum = Query(ParamsEnum.simple),
     model: str = Query("medium", enum=["medium", "s2s"]),
-    token: str = Depends(verify_token),
 ):
     if model != "medium":
         raise HTTPException(status_code=400, detail="Only model=medium is supported for region_forecast now.")
